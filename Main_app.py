@@ -1,3 +1,6 @@
+import html as html_lib
+import re
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -28,6 +31,32 @@ def get_enc(name):
         return None
 
 
+PALETA = ["#FFADAD", "#FFD6A5", "#FDFFB6", "#CAFFBF", "#9BF6FF", "#A0C4FF", "#BDB2FF", "#FFC6FF"]
+
+METODOS_BASICOS = {
+    "Palabras (espacios)": lambda t, nw, nc: t.split(),
+    "Palabras + puntuación (regex)": lambda t, nw, nc: re.findall(r"\w+|[^\w\s]", t, re.UNICODE),
+    "Oraciones": lambda t, nw, nc: [s for s in re.split(r"(?<=[.!?¡¿])\s+", t.strip()) if s],
+    "Caracteres": lambda t, nw, nc: list(t),
+    "N-gramas de palabras": lambda t, nw, nc: [" ".join(w[i:i + nw]) for w in [re.findall(r"\w+", t)]
+                                               for i in range(max(len(w) - nw + 1, 0))],
+    "N-gramas de caracteres": lambda t, nw, nc: [t[i:i + nc] for i in range(max(len(t) - nc + 1, 0))],
+}
+
+
+def render_tokens(toks, ids=None):
+    """Devuelve HTML con cada token en una 'píldora' de color alterno y su ID opcional."""
+    partes = []
+    for i, t in enumerate(toks):
+        txt = html_lib.escape(t).replace(" ", "␣").replace("\n", "↵")
+        etiqueta = (f'<sub style="font-size:0.65em;color:#444;margin-left:3px">{ids[i]}</sub>'
+                    if ids is not None else "")
+        partes.append(f'<span style="background:{PALETA[i % len(PALETA)]};color:#111;padding:3px 5px;'
+                      f'margin:2px;border-radius:6px;display:inline-block;font-family:monospace;'
+                      f'border:1px solid rgba(0,0,0,.12)">{txt}{etiqueta}</span>')
+    return '<div style="line-height:2.2">' + "".join(partes) + "</div>"
+
+
 # ---------------- Sidebar ----------------
 st.sidebar.title("🔑 Configuración")
 api_key = st.sidebar.text_input("API key de Groq", type="password", placeholder="gsk_...")
@@ -53,8 +82,9 @@ st.sidebar.caption("Obtén tu key en console.groq.com")
 
 st.title("🧠 LLM Lab: tokens, representaciones y generación")
 
-tab_models, tab_tok, tab_bow, tab_sim, tab_emb, tab_gen = st.tabs(
-    ["🤖 Modelos", "🔤 Tokens", "🧺 Bag of Words", "📏 Similitud", "📍 Embeddings", "✍️ Generación"]
+tab_models, tab_tok, tab_bow, tab_sim, tab_emb, tab_gen, tab_temp = st.tabs(
+    ["🤖 Modelos", "🔤 Tokens", "🧺 Bag of Words", "📏 Similitud", "📍 Embeddings", "✍️ Generación",
+     "🌡️ Comparar temperaturas"]
 )
 
 # ---------------- Modelos ----------------
@@ -76,29 +106,45 @@ with tab_models:
 
 # ---------------- Tokens ----------------
 with tab_tok:
-    st.subheader("Tokenización y Token IDs")
-    text_tok = st.text_area("Texto", "Los modelos de lenguaje convierten el texto en tokens antes de procesarlo.")
-    enc_names = st.multiselect("Tokenizadores a comparar", list(ENCODINGS), default=list(ENCODINGS)[:2])
-    colors = ["#FFD6A5", "#CAFFBF", "#9BF6FF", "#BDB2FF", "#FFC6FF", "#FDFFB6"]
+    st.subheader("Tokenización con diferentes métodos")
+    text_tok = st.text_area("Texto a tokenizar",
+                            "Los modelos de lenguaje convierten el texto en tokens. ¡La tokenización es clave! "
+                            "Ejemplo: GPT-4o procesa 1,234 palabras rápidamente.")
+    metodos_sel = st.multiselect("Métodos a comparar", list(METODOS_BASICOS) + list(ENCODINGS),
+                                 default=["Palabras (espacios)", "Palabras + puntuación (regex)",
+                                          "Oraciones", "o200k_base (GPT-4o / gpt-oss)"])
+    c1, c2, c3 = st.columns(3)
+    n_word = c1.slider("n para n-gramas de palabras", 2, 4, 2)
+    n_char = c2.slider("n para n-gramas de caracteres", 2, 5, 3)
+    mostrar_ids = c3.checkbox("Mostrar ID sobre cada token", value=True)
+
     resumen = []
-    for name in enc_names:
-        enc = get_enc(ENCODINGS[name])
-        if enc is None:
-            continue
-        ids = enc.encode(text_tok)
-        toks = [enc.decode_single_token_bytes(i).decode("utf-8", errors="replace") for i in ids]
-        resumen.append({"tokenizador": name, "tokens": len(ids), "caracteres": len(text_tok),
-                        "caracteres/token": round(len(text_tok) / max(len(ids), 1), 2)})
-        st.markdown(f"**{name}** — {len(ids)} tokens")
-        html = "".join(
-            f'<span style="background:{colors[i % len(colors)]};color:#000;padding:2px 3px;'
-            f'margin:1px;border-radius:4px;display:inline-block">{t.replace(" ", "␣")}</span>'
-            for i, t in enumerate(toks))
-        st.markdown(html, unsafe_allow_html=True)
+    for metodo in metodos_sel:
+        if metodo in ENCODINGS:
+            enc = get_enc(ENCODINGS[metodo])
+            if enc is None:
+                continue
+            ids = enc.encode(text_tok)
+            toks = [enc.decode_single_token_bytes(i).decode("utf-8", errors="replace") for i in ids]
+            tipo = "Subpalabras BPE"
+        else:
+            toks = METODOS_BASICOS[metodo](text_tok, n_word, n_char)
+            vocab = {t: i for i, t in enumerate(dict.fromkeys(toks))}  # ID = orden de aparición en el vocabulario
+            ids = [vocab[t] for t in toks]
+            tipo = "Regla / heurística"
+        resumen.append({"método": metodo, "tipo": tipo, "tokens": len(toks), "únicos": len(set(toks)),
+                        "caracteres/token": round(len(text_tok) / max(len(toks), 1), 2)})
+        st.markdown(f"##### {metodo} · {len(toks)} tokens")
+        st.markdown(render_tokens(toks, ids if mostrar_ids else None), unsafe_allow_html=True)
         with st.expander("Ver tabla token → ID"):
-            st.dataframe(pd.DataFrame({"token": toks, "token_id": ids}), width="stretch")
+            st.dataframe(pd.DataFrame({"posición": range(len(toks)), "token": toks, "token_id": ids}),
+                         width="stretch", hide_index=True)
     if resumen:
-        st.dataframe(pd.DataFrame(resumen), width="stretch", hide_index=True)
+        st.markdown("#### Resumen comparativo")
+        df_res = pd.DataFrame(resumen)
+        st.dataframe(df_res, width="stretch", hide_index=True)
+        st.plotly_chart(px.bar(df_res, x="método", y="tokens", color="tipo", text="tokens",
+                               title="Número de tokens por método"), width="stretch")
 
 # ---------------- Documentos compartidos ----------------
 DOCS_DEFAULT = """El gato duerme en el sofá.
@@ -224,5 +270,77 @@ with tab_gen:
                                f"total: {u.total_tokens} · fin: {r.choices[0].finish_reason}")
                 except Exception as e:
                     st.error(f"Error: {e}")
+    elif client is None:
+        st.warning("Ingresa tu API key de Groq en la barra lateral.")
+
+# ---------------- Comparar temperaturas ----------------
+with tab_temp:
+    st.subheader("Laboratorio de temperatura: compara respuestas")
+    st.caption("Temperatura baja → respuestas más deterministas; alta → más variadas y creativas.")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        modelo_t = st.selectbox("Modelo", models, key="t_model")
+        n_temps = st.number_input("Número de temperaturas", 2, 5, 3, key="t_n")
+        temps_usr = [st.slider(f"Temperatura #{i+1}", 0.0, 2.0, round(min(i * 0.8, 2.0), 1), 0.1, key=f"t_{i}")
+                     for i in range(int(n_temps))]
+        top_p_t = st.slider("Top-p", 0.0, 1.0, 1.0, 0.05, key="t_topp")
+        max_tok_t = st.slider("Máx. tokens", 16, 2048, 300, 16, key="t_max")
+        repeticiones = st.number_input("Respuestas por temperatura", 1, 3, 1, key="t_rep",
+                                       help="Varias muestras por temperatura muestran cuánto varía la salida.")
+    with c2:
+        system_t = st.text_area("Prompt de sistema", "Eres un asistente creativo que responde en español.", key="t_sys")
+        prompt_t = st.text_area("Prompt", "Inventa un eslogan para una cafetería y explícalo en dos frases.",
+                                height=130, key="t_prompt")
+        run_t = st.button("🌡️ Comparar", type="primary", disabled=client is None, key="t_run")
+
+    if run_t and client:
+        resultados = []
+        barra = st.progress(0.0, "Generando...")
+        total = len(temps_usr) * int(repeticiones)
+        for k, (t, r) in enumerate([(t, r) for t in temps_usr for r in range(int(repeticiones))]):
+            try:
+                resp = client.chat.completions.create(
+                    model=modelo_t, temperature=t, top_p=top_p_t, max_tokens=max_tok_t,
+                    messages=[{"role": "system", "content": system_t}, {"role": "user", "content": prompt_t}])
+                texto = resp.choices[0].message.content or ""
+                resultados.append({"temperatura": t, "muestra": r + 1, "texto": texto,
+                                   "tokens": resp.usage.completion_tokens})
+            except Exception as e:
+                resultados.append({"temperatura": t, "muestra": r + 1, "texto": f"⚠️ Error: {e}", "tokens": 0})
+            barra.progress((k + 1) / total, f"Generando {k + 1}/{total}")
+        barra.empty()
+        st.session_state["temp_resultados"] = resultados
+
+    res = st.session_state.get("temp_resultados")
+    if res:
+        ver_tokens = st.toggle("Mostrar respuestas tokenizadas con color", value=False)
+        cols = st.columns(len(res) if len(res) <= 5 else 5)
+        for i, r in enumerate(res):
+            with cols[i % len(cols)]:
+                st.markdown(f"**T = {r['temperatura']}** · muestra {r['muestra']}")
+                if ver_tokens:
+                    st.markdown(render_tokens(re.findall(r"\w+|[^\w\s]", r["texto"])), unsafe_allow_html=True)
+                else:
+                    st.info(r["texto"])
+
+        st.markdown("#### Métricas de las respuestas")
+        filas = []
+        for r in res:
+            palabras = re.findall(r"\w+", r["texto"].lower())
+            filas.append({"temperatura": r["temperatura"], "muestra": r["muestra"],
+                          "tokens generados": r["tokens"], "palabras": len(palabras),
+                          "diversidad léxica": round(len(set(palabras)) / max(len(palabras), 1), 3)})
+        df_m = pd.DataFrame(filas)
+        st.dataframe(df_m, width="stretch", hide_index=True)
+        st.plotly_chart(px.scatter(df_m, x="temperatura", y="diversidad léxica", size="palabras",
+                                   title="Diversidad léxica vs temperatura"), width="stretch")
+
+        textos = [r["texto"] for r in res]
+        if len(textos) > 1 and all(t.strip() for t in textos):
+            S = cosine_similarity(TfidfVectorizer().fit_transform(textos))
+            etiquetas = [f"T={r['temperatura']}·{r['muestra']}" for r in res]
+            st.plotly_chart(px.imshow(S, x=etiquetas, y=etiquetas, text_auto=".2f", zmin=0, zmax=1,
+                                      color_continuous_scale="Viridis",
+                                      title="Similitud coseno (TF-IDF) entre respuestas"), width="stretch")
     elif client is None:
         st.warning("Ingresa tu API key de Groq en la barra lateral.")
